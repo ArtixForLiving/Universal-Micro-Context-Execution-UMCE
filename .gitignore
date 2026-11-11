@@ -1,0 +1,38 @@
+# UMCE scratchpad / state files (Phase 4)
+.umce-state*
+scratch/
+scratch*/
+*.umce-state
+
+# Generic build / dependency output (excluded in Phase 1 searches too)
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+target/
+bin/
+obj/
+vendor/
+__pycache__/
+.venv/
+coverage/
+.turbo/
+.cache/
+
+# Environment & OS
+.env
+.env.local
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
