@@ -1,7 +1,7 @@
 ---
 name: universal-micro-context-execution
 description: Use when one request will span many tool calls, more than one file, a sub-agent dispatch, an SDD task, or a long build-test-fix loop; when context or cost grows faster than progress; when whole-file reads, verbose build logs, or pasted diffs flood the window
-version: 2.0.0
+version: 2.1.0
 triggers:
   - complex_prompt
   - sdd_workflow
@@ -28,7 +28,14 @@ This protocol trades two things for that: some up-front orientation work, and oc
 
 **Companions:** REQUIRED SUB-SKILL `verification-before-completion` before claiming done. `systematic-debugging` when a failure needs root-cause work; `context-engineering` for how context gets assembled before the request starts. UMCE governs only *how much* you read and how fast you loop.
 
-**Calibration:** this protocol costs 2-3 extra calls up front. Measured on an 86-line file, one filter added across one file: without it 6 turns / 75k input tokens, with it 8 turns / 103k. It pays back on requests that reuse a file across many turns, not on one-file one-edit work. Below ~5 tool calls, follow the phases loosely and skip the size check.
+**Calibration:** this protocol costs 2-3 extra calls up front. Measured A/B on an identical tree:
+
+| Task | Control | Skill | Delta |
+|---|---|---|---|
+| One filter, one 86-line file, 7 turns | 75k input tokens | 103k input tokens | **+37%** (more expensive) |
+| Rename component across 5 files, 10 turns | 164k input tokens | 153k input tokens | **–7%** (cheaper) |
+
+It pays back on requests that reuse context across many turns or many files, not on one-file one-edit work. Model estimate for larger loops: 600-line files over 15 turns saves roughly **9–34%**; large files with verbose build loops over 20–40 turns saves roughly **34–58%**. Below ~5 tool calls, follow the phases loosely and skip any shell size check. See [BENCHMARK.md](BENCHMARK.md) for baseline data and RED-phase scenarios.
 
 ## When to Use
 
@@ -65,7 +72,10 @@ Produce three things in order, one batched turn each where possible.
 
 Where this doc writes `grep -n`, read `Select-String -Pattern` on PowerShell, `rg -n` when ripgrep is installed, and the editor's symbol tool when one is available.
 
-**2. Size before you read.** One cheap call decides the read mode:
+**2. Size before you read.** Choose the read mode from total lines without unnecessary shell overhead:
+
+- **Native IDE tool mode:** If the editor's built-in file reader or outline tool already reports total lines in its response metadata, skip any shell line-count call and read the first 100 lines or the outline directly.
+- **Shell fallback:** Otherwise, batch a line-count call in the same turn as the search burst:
 
 | Shell | Line count |
 |---|---|
@@ -107,12 +117,12 @@ Build, test, and log output is the worst offender: thousands of lines for six us
 
 | Shell | Keep this much |
 |---|---|
-| PowerShell 7+ | `<cmd> 2>&1 \| Select-String -Pattern 'error\|FAILED\|panic\|warning' -Context 3,3 \| Select-Object -First 45` |
-| bash / zsh | `<cmd> 2>&1 \| grep -E -C 3 "error\|FAILED\|panic\|warning" \| head -n 45` |
+| PowerShell 7+ | `<cmd> 2>&1 \| Tee-Object -Variable _out \| Out-Null; $_ec = $LASTEXITCODE; $_out \| Select-String -Pattern 'error\|FAILED\|panic\|warning' -Context 3,3 \| Select-Object -First 45; "exit=$_ec"` |
+| bash / zsh | `<cmd> 2>&1 \| grep -E -C 3 "error\|FAILED\|panic\|warning" \| head -n 45; echo "cmd_exit=${PIPESTATUS[0]}${pipestatus[1]}"` |
 
-Quiet flags by tool: `pytest -q --tb=line`, `cargo test -q`, `npm test --silent`, `dotnet build -v q`, `git --no-pager`, `git diff --stat` before `git diff`, `--reporter=dot` or `--reporter=line` for JS runners.
+Quiet flags by tool: `pytest -q --tb=line`, `cargo test -q`, `cargo check -q --message-format=short`, `tsc --noEmit --pretty false`, `npm test --silent`, `dotnet build -v q /clp:ErrorsOnly`, `git --no-pager`, `git diff --stat` before `git diff`, `--reporter=dot` or `--reporter=line` for JS runners.
 
-**Empty output is ambiguous** — a clean run and a run that never started both print nothing through the filter. Append the exit code to the same command (`; "exit=$LASTEXITCODE"` on PowerShell, `; echo "exit=$?"` on bash) so the filtered result is self-describing.
+**Empty output is ambiguous** — a clean run and a run that never started both print nothing through the filter. Capture the primary command's **true exit code** before or across the filter pipeline (`$_ec = $LASTEXITCODE` before filtering on PowerShell; `${PIPESTATUS[0]}${pipestatus[1]}` on bash/zsh, since trailing `exit=$?` only reads `head`/`grep`) so the filtered result is self-describing.
 
 **Success path:** when the run is expected to pass, keep only the summary line (`| tail -n 5` on a bare `-q` run). Full verbose output is reserved for a failure you are actively reading, and even then through the filter.
 
@@ -123,6 +133,8 @@ Quiet flags by tool: `pytest -q --tb=line`, `cargo test -q`, `npm test --silent`
 **Default edit primitive: matched-text replace.** Choose an `old_text` window of 5-15 lines that is unique in the file — a signature line plus two body lines is normally enough — and replace it. Matched-text edits survive unrelated churn and need no re-anchoring.
 
 **Anchor `old_text` on structure, not formatting.** Trailing whitespace, tabs vs spaces, and reflowed comments break matches; pick lines whose content is semantically stable (signatures, error strings, imports).
+
+**First-match-failure protocol (anti-blind retry):** If an `old_text` match fails once, never guess indentation or retry blindly. Immediately read a 25-line slice around the target line to verify exact indentation, or widen `old_text` to the nearest structural boundary before retrying.
 
 **Line-based patch fallback.** When the tool patches by line range:
 
@@ -203,7 +215,7 @@ Dispatch in parallel only when tasks are independent. Shared files or shared bui
 | Grepping inside `node_modules` | Thousands of duplicate hits | Pass the exclusion list, or scope to `src/` |
 | One tool call per turn on a fan-out search | Each turn re-sends the whole window | Send all independent calls in one response |
 | Passing the parent transcript to a sub-agent | Cost multiplied by child count, focus diluted | Build the five-slot payload fresh |
-| Running bare `npm test` / `cargo build` | 2,000 lines for one error | `-q`, `2>&1`, filter, `head -n 45` |
+| Running bare `npm test` / `cargo build` | 2,000 lines for one error | `-q`, `2>&1`, filter, `head -n 45`, true exit code |
 | Editing top-down by line number | Later line numbers shift mid-edit | `old_text` replace, or bottom-up patches |
 | Rewriting a file to change four lines | Diff noise plus a fresh review | Matched-text replace |
 | Retrying the same fix a fourth and fifth time | 15 turns for one root cause | Strike 3: `diff --stat`, revert, report |
@@ -241,33 +253,10 @@ Stop and re-read this skill when you catch any of these:
 Before the final answer:
 
 - [ ] Every edited hunk was inside a window I had actually read — no blind edits
-- [ ] Tests or a build were re-run after the last edit, filtered output kept
-- [ ] The final diff matches the intended file list, nothing stray — `git --no-pager diff --stat` in a repo, a compare against a pre-edit backup inside a non-repo workspace
+- [ ] Tests or a build were re-run after the last edit, with filtered output and the primary command's true exit code
+- [ ] The final diff matches the intended file list, nothing stray — `git --no-pager diff --stat` in a repo, `Compare-Object` against a pre-edit backup inside a non-repo workspace
 - [ ] Scratchpad deleted, gitignored, or named in the answer
 - [ ] The answer lists files and line ranges instead of pasting diffs
 - [ ] If the circuit breaker fired, the root-cause report has three concrete bullets
 
-## Appendix: RED-Phase Test Scenarios
-
-Untested skills are untested code. Run each scenario against a subagent **without** this skill first, record the failure mode verbatim, then re-run with it. A scenario only passes when the behavior shape below appears.
-
-| Scenario | Baseline failure to record | Passing behavior |
-|---|---|---|
-| "Rename this helper used in 12 files" | Whole-file reads, one Read per turn, then line-based edits that drift | One `grep -n` burst, slices only, bottom-up or matched-text edits |
-| "This test fails intermittently" | Four bare `npm test` runs, then a fifth fix attempt | `-q` filtered runs, distinct hypotheses, strike 3 hand-off |
-| "Fan out this refactor to 3 agents" | Full transcript pasted into each prompt | Five-slot payload, `STATUS/FILES/SUMMARY/RISK` return contract |
-| "Add a field across the stack" | Scratchpad or plan repeated in every chat turn, left behind at the end | ≤40-line scratchpad, deleted or disclosed at the end |
-| "Migrate 8 files, one long request" | Turn 25 re-reads files from turn 4 | Anchors reused, no redundant reads, no code echo in the final answer |
-
-### Baseline measured on a small task
-
-Both arms ran the same task (add one filter, one 86-line file, verify with a build) from an identical tree. Both produced the same correct diff and a green build.
-
-| Arm | Turns | Iterations | Input tokens | Read shape |
-|---|---|---|---|---|
-| Control | 5 | 6 | 74,952 | one 30-line slice, no size check |
-| Skill | 5 | 8 | 103,180 | 3 parallel searches, 2 slices, whole-file read, `RISK` line |
-
-Holds: the skill arm batched searches, disclosed files by line range, and appended the exit code. Costs: +37% input tokens and 2 extra iterations for a 4-hunk change in one file — small-task evidence that the calibration paragraph above is needed. The size-check step was the biggest overhead; skipping it below ~5 tool calls is the fix.
-
-Also found by the dry run: this workspace is not a git repo, so `git diff --stat` needs a non-repo fallback (added to Phase 6 and Verification), and empty filtered output needs an appended exit code to be readable (added to Terminal Output Discipline).
+See [BENCHMARK.md](BENCHMARK.md) for empirical A/B measurements and RED-phase test scenarios.

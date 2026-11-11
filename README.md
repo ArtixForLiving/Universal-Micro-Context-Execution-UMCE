@@ -42,6 +42,7 @@ The skill is automatically detected through the `name` and `description` YAML fr
 ```
 universal-micro-context-execution/
 ├── SKILL.md      # Full protocol (read by agents when relevant)
+├── BENCHMARK.md  # Empirical calibration & RED-phase test scenarios
 ├── README.md     # This file (for humans)
 ├── LICENSE       # Usage license
 └── .gitignore    # Files not to commit
@@ -62,4 +63,4 @@ See the `LICENSE` file in this repository.
 
 ## Contributing
 
-Pull requests are welcome. If you find a loophole or a scenario where UMCE fails, open an issue with a RED-phase test scenario (see the Appendix in `SKILL.md`).
+Pull requests are welcome. If you find a loophole or a scenario where UMCE fails, open an issue with a RED-phase test scenario (see [BENCHMARK.md](BENCHMARK.md)).
